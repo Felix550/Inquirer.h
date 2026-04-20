@@ -202,6 +202,9 @@ INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *m
 // Should not echo back after submit
 #define TEXT_HIDE_ECHO (1 << 1)
 
+// Field can be empty
+#define TEXT_NOT_REQUIRED (1 << 2)
+
 typedef struct
 {
     // Mark when Asking
@@ -237,6 +240,12 @@ INQUIRERDEF void readline(char *out, size_t out_size, bool put_newline, bool is_
 
 // Expanded Text Input, Must Call free(...) on the out char*
 INQUIRERDEF char *TextEx(const char *message, TextParams *params);
+
+// Show an error in the bottom left of the console
+INQUIRERDEF void ShowError(const char *message);
+
+// Clear the error
+INQUIRERDEF void ClearError();
 
 // Easy Interface for Text Input, Must Call free(...) on the out char*
 // Call with:
@@ -303,7 +312,10 @@ void readline(char *out, size_t out_size, bool put_newline, bool is_password)
             {
                 if (cur < len)
                 {
-                    putch(out[cur]);
+                    if(is_password)
+                        putch('*');
+                    else
+                        putch(out[cur]);
                     cur++;
                 }
             }
@@ -376,6 +388,39 @@ char *make_str(char c, size_t len)
     return s;
 }
 
+void ShowError(const char *message)
+{
+    bool will_overwrite = CursorIsOnLastRow();
+
+    printf("\x1b[s"); // save cursor
+
+    if (will_overwrite)
+        printf("\x1b[S");
+
+    printf(BOTTOM_LEFT); // go bottom left
+
+    printf("\x1b[2K"); // clean row
+    printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
+
+    printf("\x1b[u"); // restore cursor
+
+    if (will_overwrite)
+        printf("\x1b[A");
+}
+
+void ClearError()
+{
+    printf("\x1b[s");           // save cursor
+
+    printf("\r");               // got the the start of the line
+    printf("\x1b[B");           // go down a line
+
+    printf(DELETE_FROM_CURSOR); // clean up from cursor
+
+    printf("\x1b[A");           // go up a line
+    printf("\x1b[u");           // reset cursor
+}
+
 char *TextEx(const char *message, TextParams *p)
 {
     TextParams params = {0};
@@ -425,9 +470,7 @@ char *TextEx(const char *message, TextParams *p)
         // clear invalid message
         if (show_invalid)
         {
-            printf("\x1b[s");           // save cursor
-            printf(DELETE_FROM_CURSOR); // clean up
-            printf("\x1b[u");           // reset cursor
+            ClearError();
             show_invalid = 0;
         }
 
@@ -446,7 +489,10 @@ char *TextEx(const char *message, TextParams *p)
             {
                 if (cur < len)
                 {
-                    putch(out[cur]);
+                    if (params.flags & TEXT_PASSWORD)
+                        putch('*'); // Print Hidden Char
+                    else
+                        putch(out[cur]);
                     cur++;
                 }
             }
@@ -458,32 +504,24 @@ char *TextEx(const char *message, TextParams *p)
         }
         else if (ch == KEY_ENTER)
         {
+
             out[len] = '\0';
-            if (!params.validation || params.validation(out, message, params.data))
+
+            // true if it is not a requirement, false if it is a requirement and empty, true if it is a requirement and full
+            bool empty_check = params.flags & TEXT_NOT_REQUIRED || strlen(out) > 0;
+
+            if ((!params.validation || params.validation(out, message, params.data)) && empty_check)
             {
                 break;
             }
-            bool will_overwrite = CursorIsOnLastRow();
 
             // show message if not valid
             show_invalid = 1;
 
-            printf("\x1b[s"); // save cursor
-
-            // printf(BOTTOM_LEFT); // vai bottom-left
-
-            if (will_overwrite)
-                printf("\x1b[S");
-
-            printf(BOTTOM_LEFT); // torna bottom-left (dopo scroll cambia)
-
-            printf("\x1b[2K"); // pulisci riga
-            printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, params.invalid_message);
-
-            printf("\x1b[u"); // restore cursor
-
-            if (will_overwrite)
-                printf("\x1b[A");
+            if (!empty_check)
+                ShowError("This field is required");
+            else
+                ShowError(params.invalid_message);
         }
         else if (ch == KEY_BACKSPACE)
         {

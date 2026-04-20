@@ -13,7 +13,7 @@ int main(void)
 {
     char *name = Text("What's Your Name:", NULL);
     char *pswd = Text("What's Your Password:", .instruction = "Keep it a secret!", .validation = validate_password, .invalid_message = "Inserisci Una Password Valida", .flags = TEXT_PASSWORD);
-    char *job = Text("What's Your Job:", .instruction = "Let's not make other see that...", .flags = TEXT_HIDE_ECHO);
+    char *job = Text("What's Your Job:", .instruction = "Not everyone has one...", .flags = TEXT_HIDE_ECHO | TEXT_NOT_REQUIRED);
 
     printf("Welcome %s with password: %s, job: %s\n", name, pswd, job);
 
