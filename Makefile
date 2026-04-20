@@ -1,8 +1,8 @@
 ifeq ($(OS),Windows_NT)
-    OUT := main.exe
+    OUT := test.exe
 else
-    OUT := main
+    OUT := test
 endif
 
-$(OUT): main.c inquirer.h
-	gcc -Wall -Wextra -o $(OUT) main.c
+$(OUT): test.c inquirer.h
+	gcc -Wall -Wextra -o $(OUT) test.c
