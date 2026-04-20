@@ -221,6 +221,9 @@ typedef struct
 
     // Message to show when input is invalid
     char *invalid_message;
+    
+    // Message to show when input is required but was submitted empty
+    char *required_message;
 
     // User data for callbacks
     void *data;
@@ -429,6 +432,7 @@ char *TextEx(const char *message, TextParams *p)
     params.instruction = "";
     params.validation = NULL;
     params.invalid_message = "Invalid";
+    params.required_message = "This field is required";
     params.data = NULL;
 
     if (p)
@@ -443,6 +447,8 @@ char *TextEx(const char *message, TextParams *p)
             params.validation = p->validation;
         if (p->invalid_message)
             params.invalid_message = p->invalid_message;
+        if (p->required_message)
+            params.required_message = p->required_message;
         if (p->data)
             params.data = p->data;
 
@@ -519,7 +525,7 @@ char *TextEx(const char *message, TextParams *p)
             show_invalid = 1;
 
             if (!empty_check)
-                ShowError("This field is required");
+                ShowError(params.required_message);
             else
                 ShowError(params.invalid_message);
         }
