@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdarg.h>
+#include <signal.h>
 
 #ifndef INQUIRERDEF
 #ifdef INQUIRER_IMPL
@@ -22,7 +24,7 @@
 #include <conio.h>
 #include <windows.h>
 
-int CursorIsOnLastRow(void)
+int CursorIsOnLastRow(int add)
 {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut == INVALID_HANDLE_VALUE)
@@ -35,7 +37,22 @@ int CursorIsOnLastRow(void)
     int cursorRow = csbi.dwCursorPosition.Y + 1; // 1-based
     int lastRow = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
 
-    return cursorRow == lastRow;
+    return cursorRow + add >= lastRow;
+}
+
+void GetTerminalSize(int *rows, int *cols)
+{
+    CONSOLE_SCREEN_BUFFER_INFO c;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &c))
+    {
+        *cols = c.srWindow.Right - c.srWindow.Left + 1;
+        *rows = c.srWindow.Bottom - c.srWindow.Top + 1;
+    }
+    else
+    {
+        *rows = 24;
+        *cols = 80;
+    }
 }
 
 #else
@@ -43,8 +60,9 @@ int CursorIsOnLastRow(void)
 /* POSIX (Linux / macOS / BSD) */
 #include <termios.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 
-static int getch_impl(void)
+INQUIRERDEF int _getch(void)
 {
     struct termios old_attr, new_attr;
     int ch;
@@ -52,7 +70,7 @@ static int getch_impl(void)
     tcgetattr(STDIN_FILENO, &old_attr);
     new_attr = old_attr;
 
-    new_attr.c_lflag &= ~(ICANON | ECHO | ECHOE);
+    new_attr.c_lflag &= ~(ICANON | ECHO);
 
     tcsetattr(STDIN_FILENO, TCSANOW, &new_attr);
 
@@ -63,11 +81,6 @@ static int getch_impl(void)
     return ch;
 }
 
-INQUIRERDEF int _getch(void)
-{
-    return getch_impl();
-}
-
 INQUIRERDEF int putch(int c)
 {
     int ret = putchar(c);
@@ -75,18 +88,22 @@ INQUIRERDEF int putch(int c)
     return ret;
 }
 
-static int GetTerminalSize(int *rows, int *cols)
+void GetTerminalSize(int *rows, int *cols)
 {
     struct winsize ws;
+
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1)
-        return 0;
+    {
+        *rows = 0;
+        *cols = 0;
+        return;
+    }
 
     *rows = ws.ws_row;
     *cols = ws.ws_col;
-    return 1;
 }
 
-static int QueryCursorPositionANSI(int *row, int *col)
+int QueryCursorPositionANSI(int *row, int *col)
 {
     struct termios oldt, raw;
 
@@ -131,19 +148,30 @@ static int QueryCursorPositionANSI(int *row, int *col)
     return 1;
 }
 
-int CursorIsOnLastRow(void)
+int CursorIsOnLastRow(int add)
 {
     int row = 0, col = 0, rows = 0, cols = 0;
 
     if (!QueryCursorPositionANSI(&row, &col))
         return 0;
 
-    if (!GetTerminalSize(&rows, &cols))
-        return 0;
+    GetTerminalSize(&rows, &cols);
 
-    return row == rows;
+    return row + add >= rows;
 }
 
+static struct termios orig_term;
+
+void init_terminal(void)
+{
+    tcgetattr(STDIN_FILENO, &orig_term);
+}
+
+void restore_terminal(void)
+{
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
+    fflush(stdout);
+}
 #endif /* _WIN32 */
 
 #ifndef DEFAULT_CAPACITY
@@ -192,6 +220,12 @@ int CursorIsOnLastRow(void)
 #define DELETE_PREVIOUS_ROW "\033[1A\r\033[2K"
 #define BOTTOM_LEFT "\x1b[999;1H"
 #define DELETE_FROM_CURSOR "\x1b[0J"
+#define DELETE_ROW "\r\x1b[2K"
+
+#define TMP_SPRINTF_SLOTS 8
+#define TMP_SPRINTF_SIZE 1024
+
+INQUIRERDEF char *tmp_sprintf(const char *fmt, ...);
 
 // Callback called eachtime user sends submit, to validate an input, should return true or false if it's valid or not
 INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *message, void *data);
@@ -221,7 +255,7 @@ typedef struct
 
     // Message to show when input is invalid
     char *invalid_message;
-    
+
     // Message to show when input is required but was submitted empty
     char *required_message;
 
@@ -231,6 +265,27 @@ typedef struct
     // Flags, they start with TEXT_
     int flags;
 } TextParams;
+
+typedef struct
+{
+    // Mark when Asking
+    char *qmark;
+
+    // Mark when Answered
+    char *amark;
+
+    // Intructions on how to Answer
+    char *instruction;
+
+    // Max options visible
+    int visible;
+} SelectParams;
+
+typedef struct
+{
+    char *display;
+    void *value;
+} Option;
 
 // reads a line from the stdin and puts result into out
 //  put_newline: if should put a new line on submit
@@ -243,6 +298,8 @@ INQUIRERDEF void readline(char *out, size_t out_size, bool put_newline, bool is_
 
 // Expanded Text Input, Must Call free(...) on the out char*
 INQUIRERDEF char *TextEx(const char *message, TextParams *params);
+
+INQUIRERDEF void *SelectEx(const char *message, Option *options, size_t options_lenght, SelectParams *params);
 
 // Show an error in the bottom left of the console
 INQUIRERDEF void ShowError(const char *message);
@@ -260,6 +317,8 @@ INQUIRERDEF void ClearError();
 //  free(name);
 #define Text(message, ...) TextEx(message, &(TextParams){__VA_ARGS__})
 
+#define Select(message, options, options_lenght, ...) SelectEx(message, options, options_lenght, &(SelectParams){__VA_ARGS__})
+
 #ifdef INQUIRER_IMPL
 
 void readline_old(char *out, size_t out_size)
@@ -276,8 +335,10 @@ void readline_old(char *out, size_t out_size)
 #define KEY_BACKSPACE '\b'
 #define KEY_CTRL_C 3
 #define KEY_ARROWS 224
-#define KEY_ARROW_L 75
+#define KEY_ARROW_U 72
+#define KEY_ARROW_D 80
 #define KEY_ARROW_R 77
+#define KEY_ARROW_L 75
 
 #else
 
@@ -285,8 +346,20 @@ void readline_old(char *out, size_t out_size)
 #define KEY_BACKSPACE 127
 #define KEY_CTRL_C 3
 #define KEY_ARROWS 91
-#define KEY_ARROW_L 'D'
+#define KEY_ARROW_U 'A'
+#define KEY_ARROW_D 'B'
 #define KEY_ARROW_R 'C'
+#define KEY_ARROW_L 'D'
+
+void handler(int sig)
+{
+    (void)sig;
+    restore_terminal();
+    printf(DELETE_FROM_CURSOR);
+    printf("\x1b[?25h");
+    fflush(stdout);
+    _exit(0);
+}
 
 #endif // _WIN32
 
@@ -315,7 +388,7 @@ void readline(char *out, size_t out_size, bool put_newline, bool is_password)
             {
                 if (cur < len)
                 {
-                    if(is_password)
+                    if (is_password)
                         putch('*');
                     else
                         putch(out[cur]);
@@ -391,9 +464,25 @@ char *make_str(char c, size_t len)
     return s;
 }
 
+char *tmp_sprintf(const char *fmt, ...)
+{
+    static char buffers[TMP_SPRINTF_SLOTS][TMP_SPRINTF_SIZE];
+    static int index = 0;
+
+    char *buf = buffers[index];
+    index = (index + 1) % TMP_SPRINTF_SLOTS;
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, TMP_SPRINTF_SIZE, fmt, args);
+    va_end(args);
+
+    return buf;
+}
+
 void ShowError(const char *message)
 {
-    bool will_overwrite = CursorIsOnLastRow();
+    bool will_overwrite = CursorIsOnLastRow(0);
 
     printf("\x1b[s"); // save cursor
 
@@ -402,7 +491,7 @@ void ShowError(const char *message)
 
     printf(BOTTOM_LEFT); // go bottom left
 
-    printf("\x1b[2K"); // clean row
+    printf(DELETE_ROW); // clean row
     printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
 
     printf("\x1b[u"); // restore cursor
@@ -413,15 +502,15 @@ void ShowError(const char *message)
 
 void ClearError()
 {
-    printf("\x1b[s");           // save cursor
+    printf("\x1b[s"); // save cursor
 
-    printf("\r");               // got the the start of the line
-    printf("\x1b[B");           // go down a line
+    printf("\r");     // got the the start of the line
+    printf("\x1b[B"); // go down a line
 
     printf(DELETE_FROM_CURSOR); // clean up from cursor
 
-    printf("\x1b[A");           // go up a line
-    printf("\x1b[u");           // reset cursor
+    printf("\x1b[A"); // go up a line
+    printf("\x1b[u"); // reset cursor
 }
 
 char *TextEx(const char *message, TextParams *p)
@@ -514,7 +603,7 @@ char *TextEx(const char *message, TextParams *p)
             out[len] = '\0';
 
             // true if it is not a requirement, false if it is a requirement and empty, true if it is a requirement and full
-            bool empty_check = params.flags & TEXT_NOT_REQUIRED || strlen(out) > 0;
+            bool empty_check = params.flags & TEXT_NOT_REQUIRED || len > 0;
 
             if ((!params.validation || params.validation(out, message, params.data)) && empty_check)
             {
@@ -595,6 +684,206 @@ char *TextEx(const char *message, TextParams *p)
     fflush(stdout);
 
     return out;
+}
+
+static void reserve_block(size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        putchar('\n');
+    printf("\x1b[%zuA", n);
+    fflush(stdout);
+}
+
+void *SelectEx(const char *message,
+               Option *options,
+               size_t options_length,
+               SelectParams *p)
+{
+
+#ifndef _WIN32
+    init_terminal();
+    signal(SIGINT, handler);
+#endif
+
+    if (!options || options_length == 0)
+        return NULL;
+
+    SelectParams params = {0};
+    params.amark = "?";
+    params.qmark = "?";
+    params.instruction = "(Use arrow keys)";
+    params.visible = 20;
+    if (p)
+    {
+        if (p->amark)
+            params.amark = p->amark;
+        if (p->qmark)
+            params.qmark = p->qmark;
+        if (p->instruction)
+            params.instruction = p->instruction;
+        if (p->visible)
+            params.visible = p->visible;
+    }
+
+    /* ── altezza del blocco: si adatta al terminale ad ogni render ─────────── */
+    /*    (ricalcolata nel loop per gestire resize della finestra)              */
+
+    printf("\x1b[?25l"); /* nascondi cursore prima di qualsiasi output */
+    fflush(stdout);
+
+    /* ── buffer di render ────────────────────────────────────────────────── */
+    /* worst-case: ogni riga può avere testo + escape color + indicatori       */
+    size_t buf_size = ((size_t)params.visible + 4) * 512;
+    char *buf = (char *)malloc(buf_size);
+    if (!buf)
+    {
+        printf("\x1b[?25h");
+        return NULL;
+    }
+
+    int current = 0;
+    size_t top = 0;
+    size_t last_block_h = 0;
+    int first = 1;
+
+    while (1)
+    {
+        int trows, tcols;
+        GetTerminalSize(&trows, &tcols);
+        (void)tcols;
+
+        size_t visible = (size_t)params.visible;
+        if (visible > options_length)
+            visible = options_length;
+        if (visible > (size_t)(trows - 2))
+            visible = (size_t)(trows - 2);
+        if (visible < 1)
+            visible = 1;
+
+        size_t block_h = visible + 1; /* 1 riga messaggio + visible righe opzioni */
+
+        /* ── primo frame o resize: riserva/aggiusta spazio ────────────────── */
+        if (first)
+        {
+            reserve_block(block_h);
+            first = 0;
+        }
+        else if (block_h != last_block_h)
+        {
+            /* il terminale è stato ridimensionato: adatta il blocco           */
+            if (block_h > last_block_h)
+            {
+                /* serve più spazio: stampa righe extra e riserva              */
+                for (size_t i = 0; i < block_h - last_block_h; i++)
+                    putchar('\n');
+                printf("\x1b[%zuA", block_h);
+                fflush(stdout);
+            }
+        }
+        last_block_h = block_h;
+
+        /* reallocare il buffer se visible è cresciuto oltre le stime iniziali */
+        if (block_h * 512 > buf_size)
+        {
+            buf_size = block_h * 512 + 256;
+            char *nb = (char *)realloc(buf, buf_size);
+            if (!nb)
+                break;
+            buf = nb;
+        }
+
+        /* ── aggiusta finestra scorrevole ─────────────────────────────────── */
+        if (current < (int)top)
+            top = (size_t)current;
+        else if (current >= (int)(top + visible))
+            top = (size_t)current - visible + 1;
+
+        int scroll_up = (top > 0);
+        int scroll_down = (top + visible < options_length);
+
+        /* ── componi il frame ─────────────────────────────────────────────── */
+        size_t pos = 0;
+
+        /* riga messaggio */
+        pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
+        if (params.instruction && params.instruction[0])
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    C_YELLOW "%s " C_RESET "%s " C_BBLACK "%s" C_RESET "\n",
+                                    params.qmark, message, params.instruction);
+        else
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    C_YELLOW "%s " C_RESET "%s\n",
+                                    params.qmark, message);
+
+        /* righe opzioni */
+        for (size_t i = 0; i < visible; i++)
+        {
+            size_t idx = top + i;
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
+
+            if ((int)idx == current)
+            {
+                /* riga selezionata: chevron ciano + testo bold-white           */
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        C_CYAN "> " C_BWHITE "%s" C_RESET,
+                                        options[idx].display);
+            }
+            else
+            {
+                /* righe normali: dimmed; frecce scorrevoli sui bordi           */
+                const char *arrow = "";
+                if (i == 0 && scroll_up)
+                    arrow = "  " C_BBLACK "^" C_RESET;
+                if (i == visible - 1 && scroll_down)
+                    arrow = "  " C_BBLACK "v" C_RESET;
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        C_BBLACK "  %s" C_RESET "%s",
+                                        options[idx].display, arrow);
+            }
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "\n");
+        }
+
+        /* risali all'inizio del blocco per il prossimo frame */
+        pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                "\x1b[%zuA", block_h);
+
+        fwrite(buf, 1, pos, stdout);
+        fflush(stdout);
+
+        /* ── input ────────────────────────────────────────────────────────── */
+        int ch = _getch();
+        if (ch == 0 || ch == KEY_ARROWS)
+        {
+            ch = _getch();
+            if (ch == KEY_ARROW_U)
+                current = (current > 0) ? current - 1 : (int)options_length - 1;
+            else if (ch == KEY_ARROW_D)
+                current = (current < (int)options_length - 1) ? current + 1 : 0;
+        }
+        else if (ch == KEY_ENTER)
+        {
+            break;
+        }
+        else if (ch == KEY_CTRL_C)
+        {
+            printf(DELETE_FROM_CURSOR);
+            printf("\x1b[?25h");
+            fflush(stdout);
+            free(buf);
+            exit(0);
+        }
+    }
+
+    printf(DELETE_FROM_CURSOR);
+
+    printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
+           params.amark, message, options[current].display);
+
+    printf("\x1b[?25h");
+    fflush(stdout);
+    free(buf);
+
+    return options[current].value;
 }
 
 #endif // INQUIRER_IMPL
