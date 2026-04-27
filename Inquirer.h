@@ -1014,6 +1014,9 @@ bool ConfirmEx(const char *message, ConfirmParams *p)
         {
             result = false;
             break;
+        }else if (ch == KEY_CTRL_C)
+        {
+            exit(0);
         }
     }
 
