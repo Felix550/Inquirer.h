@@ -296,6 +296,18 @@ typedef struct
     void *value;
 } Option;
 
+typedef struct
+{
+    // Mark when Asking
+    char *qmark;
+
+    // Mark when Answered
+    char *amark;
+
+    // Intructions on how to Answer, default '(y/N)'
+    char *instruction;
+} ConfirmParams;
+
 // reads a line from the stdin and puts result into out
 //  put_newline: if should put a new line on submit
 //  is_password: if should hide the input
@@ -310,6 +322,9 @@ INQUIRERDEF char *TextEx(const char *message, TextParams *params);
 
 // Expanded Select Input
 INQUIRERDEF void *SelectEx(const char *message, Option *options, size_t options_lenght, SelectParams *params);
+
+// expanded Confirm
+bool ConfirmEx(const char *message, ConfirmParams *params);
 
 // Show an error in the bottom left of the console
 INQUIRERDEF void ShowError(const char *message);
@@ -344,6 +359,8 @@ INQUIRERDEF void ClearError();
 //                                                                      ^---- options_count
 //  ... use selected (casting it to it's original type) ...
 #define Select(message, options, options_lenght, ...) SelectEx(message, options, options_lenght, &(SelectParams){__VA_ARGS__})
+
+#define Confirm(message, ...) ConfirmEx(message, &(ConfirmParams){__VA_ARGS__});
 
 #ifdef INQUIRER_IMPL
 
@@ -513,10 +530,10 @@ void ShowError(const char *message)
     printf("\x1b[s"); // save cursor
 
     if (will_overwrite)
-        printf("\x1b[S");  // scroll up
+        printf("\x1b[S"); // scroll up
 
-    printf("\x1b[B");      // go down one line (relative positioning)
-    printf(DELETE_ROW);    // clean row
+    printf("\x1b[B");   // go down one line (relative positioning)
+    printf(DELETE_ROW); // clean row
     printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
 
     printf("\x1b[u"); // restore cursor
@@ -571,7 +588,7 @@ char *TextEx(const char *message, TextParams *p)
 
     // Handle overflow: check if cursor is on last row and scroll if needed
     if (CursorIsOnLastRow(1))
-        printf("\x1b[S");  // Scroll up one line
+        printf("\x1b[S"); // Scroll up one line
 
     if (strcmp(params.instruction, "") != 0)
         printf(C_YELLOW "%s " C_RESET "%s " C_BWHITE "%s " C_BGREEN, params.qmark, message, params.instruction);
@@ -782,10 +799,10 @@ void *SelectEx(const char *message,
         if (visible > options_length)
             visible = options_length;
 
-        size_t overhead = 1 + (has_border ? 2 : 1); /* message [+ top + bottom] */
-        int available = trows - (int)overhead - (int)has_border;      /* rows left after message [+ borders] */
+        size_t overhead = 1 + (has_border ? 2 : 1);              /* message [+ top + bottom] */
+        int available = trows - (int)overhead - (int)has_border; /* rows left after message [+ borders] */
         size_t max_visible = (size_t)(available >= 1 ? available : 1);
-        
+
         if (visible > max_visible)
             visible = max_visible;
         if (visible < 1)
@@ -799,8 +816,8 @@ void *SelectEx(const char *message,
         {
             // Handle overflow: check if cursor is on last row and scroll if needed
             if (CursorIsOnLastRow((int)block_h - 1))
-                printf("\x1b[S");  // Scroll up one line
-            
+                printf("\x1b[S"); // Scroll up one line
+
             reserve_block(block_h);
             first = 0;
         }
@@ -951,6 +968,67 @@ void *SelectEx(const char *message,
     free(buf);
 
     return options[current].value;
+}
+
+bool ConfirmEx(const char *message, ConfirmParams *p)
+{
+    ConfirmParams params = {0};
+    params.amark = "?";
+    params.qmark = "?";
+    params.instruction = "(y/N)";
+
+    if (p)
+    {
+        if (p->amark)
+            params.amark = p->amark;
+        if (p->qmark)
+            params.qmark = p->qmark;
+
+        if (p->instruction)
+            params.instruction = p->instruction;
+    }
+
+    // Handle overflow: check if cursor is on last row and scroll if needed
+    if (CursorIsOnLastRow(1))
+        printf("\x1b[S"); // Scroll up one line
+
+    if (strcmp(params.instruction, "") != 0)
+        printf(C_YELLOW "%s " C_RESET "%s " C_BWHITE "%s " C_BGREEN, params.qmark, message, params.instruction);
+    else
+        printf(C_YELLOW "%s " C_RESET "%s " C_BGREEN, params.qmark, message);
+
+    bool result = false;
+
+    while (1)
+    {
+        printf(C_BGREEN);
+
+        int ch = _getch();
+
+        if (ch == 'y' || ch == 'Y')
+        {
+            result = true;
+            break;
+        }
+        else if (ch == 'n' || ch == 'N')
+        {
+            result = false;
+            break;
+        }
+    }
+
+    char display_result[4];
+
+    if(result)
+        snprintf(display_result,sizeof(display_result),"Yes");
+    else
+        snprintf(display_result,sizeof(display_result),"No");
+
+    printf(DELETE_FROM_CURSOR);
+    printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
+           params.amark, message, display_result);
+
+    return result;
 }
 
 #endif // INQUIRER_IMPL

@@ -24,14 +24,21 @@ int main(void)
     printf("Input: %s\n", (char *)selected);
 
     char *name = Text("What's Your Name:", NULL);
-    char *pswd = Text("What's Your Password:", .instruction = "Keep it a secret!", .validation = validate_password, .invalid_message = "Inserisci Una Password Valida", .flags = TEXT_PASSWORD);
+    char *pswd = Text("What's Your Password:", .instruction = "Keep it a secret!", .validation = validate_password, .invalid_message = "Inssert a valid password, > 8", .flags = TEXT_PASSWORD);
     char *job = Text("What's Your Job:", .instruction = "Not everyone has one...", .flags = TEXT_HIDE_ECHO | TEXT_NOT_REQUIRED);
 
+    bool confirm = Confirm("Did you answer truthfully?",.amark = "!");
     printf("Welcome %s with password: %s, job: %s\n", name, pswd, job);
+
+    if(confirm)
+        printf("You aswered all thequestion truthfully, maybe\n");
+    else
+        printf("You are a LIAR!\n");
 
     free(name);
     free(pswd);
     free(job);
+
 
     char read[256];
     printf("Insert Something: ");
