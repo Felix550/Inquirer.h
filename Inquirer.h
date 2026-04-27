@@ -34,10 +34,7 @@ int CursorIsOnLastRow(int add)
     if (!GetConsoleScreenBufferInfo(hOut, &csbi))
         return 0;
 
-    int cursorRow = csbi.dwCursorPosition.Y + 1; // 1-based
-    int lastRow = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-
-    return cursorRow + add >= lastRow;
+    return csbi.dwCursorPosition.Y + add >= csbi.srWindow.Bottom;
 }
 
 void GetTerminalSize(int *rows, int *cols)
@@ -230,6 +227,10 @@ INQUIRERDEF char *tmp_sprintf(const char *fmt, ...);
 // Callback called eachtime user sends submit, to validate an input, should return true or false if it's valid or not
 INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *message, void *data);
 
+// Flags
+
+// Flags for Text, TEXT_ Prefix
+
 // The Text input shold be hidden
 #define TEXT_PASSWORD (1 << 0)
 
@@ -238,6 +239,11 @@ INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *m
 
 // Field can be empty
 #define TEXT_NOT_REQUIRED (1 << 2)
+
+// Flags for Text, SELECT_ Prefix
+
+// The selection box should have a border
+#define SELECT_BORDER (1 << 0)
 
 typedef struct
 {
@@ -279,6 +285,9 @@ typedef struct
 
     // Max options visible
     int visible;
+
+    // Flags, they start with SELECT_
+    int flags;
 } SelectParams;
 
 typedef struct
@@ -299,6 +308,7 @@ INQUIRERDEF void readline(char *out, size_t out_size, bool put_newline, bool is_
 // Expanded Text Input, Must Call free(...) on the out char*
 INQUIRERDEF char *TextEx(const char *message, TextParams *params);
 
+// Expanded Select Input
 INQUIRERDEF void *SelectEx(const char *message, Option *options, size_t options_lenght, SelectParams *params);
 
 // Show an error in the bottom left of the console
@@ -317,6 +327,22 @@ INQUIRERDEF void ClearError();
 //  free(name);
 #define Text(message, ...) TextEx(message, &(TextParams){__VA_ARGS__})
 
+// Easy Interface for Select Input
+// Call with:
+//  Select("What's Your Favourite language:",[options],[options_count],[Params])
+//  [Params] = .[param_name]=[value]
+//  Example:
+//  // We Define the options that can be chosen, can be any vector, static one, dynamic one, etc...
+//  // Just has to be a vector off 'Option', a struct with .display as the text displayed, and .value, a void* as the returned value when selected
+//  Option options[5] = {0};
+//  options[0] = (Option){.display = "Rust", .value = (void *)"rs"};
+//  options[1] = (Option){.display = "C", .value = (void *)"c"};
+//  options[2] = (Option){.display = "C++", .value = (void *)"cpp"};
+//  options[3] = (Option){.display = "Python", .value = (void *)"py"};
+//  options[4] = (Option){.display = "Lua", .value = (void *)"how?"};
+//  void *selected = Select("What's Your Favourite language:", options, 5);
+//                                                                      ^---- options_count
+//  ... use selected (casting it to it's original type) ...
 #define Select(message, options, options_lenght, ...) SelectEx(message, options, options_lenght, &(SelectParams){__VA_ARGS__})
 
 #ifdef INQUIRER_IMPL
@@ -482,22 +508,18 @@ char *tmp_sprintf(const char *fmt, ...)
 
 void ShowError(const char *message)
 {
-    bool will_overwrite = CursorIsOnLastRow(0);
+    bool will_overwrite = CursorIsOnLastRow(1);
 
     printf("\x1b[s"); // save cursor
 
     if (will_overwrite)
-        printf("\x1b[S");
+        printf("\x1b[S");  // scroll up
 
-    printf(BOTTOM_LEFT); // go bottom left
-
-    printf(DELETE_ROW); // clean row
+    printf("\x1b[B");      // go down one line (relative positioning)
+    printf(DELETE_ROW);    // clean row
     printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
 
     printf("\x1b[u"); // restore cursor
-
-    if (will_overwrite)
-        printf("\x1b[A");
 }
 
 void ClearError()
@@ -546,6 +568,10 @@ char *TextEx(const char *message, TextParams *p)
     }
 
     char *out = malloc(DEFAULT_CAPACITY);
+
+    // Handle overflow: check if cursor is on last row and scroll if needed
+    if (CursorIsOnLastRow(1))
+        printf("\x1b[S");  // Scroll up one line
 
     if (strcmp(params.instruction, "") != 0)
         printf(C_YELLOW "%s " C_RESET "%s " C_BWHITE "%s " C_BGREEN, params.qmark, message, params.instruction);
@@ -699,10 +725,11 @@ void *SelectEx(const char *message,
                size_t options_length,
                SelectParams *p)
 {
-
 #ifndef _WIN32
     init_terminal();
     signal(SIGINT, handler);
+#else
+    SetConsoleOutputCP(CP_UTF8);
 #endif
 
     if (!options || options_length == 0)
@@ -723,17 +750,16 @@ void *SelectEx(const char *message,
             params.instruction = p->instruction;
         if (p->visible)
             params.visible = p->visible;
+        if (p->flags)
+            params.flags |= p->flags;
     }
 
-    /* ── altezza del blocco: si adatta al terminale ad ogni render ─────────── */
-    /*    (ricalcolata nel loop per gestire resize della finestra)              */
+    int has_border = (params.flags & SELECT_BORDER) != 0;
 
-    printf("\x1b[?25l"); /* nascondi cursore prima di qualsiasi output */
+    printf("\x1b[?25l");
     fflush(stdout);
 
-    /* ── buffer di render ────────────────────────────────────────────────── */
-    /* worst-case: ogni riga può avere testo + escape color + indicatori       */
-    size_t buf_size = ((size_t)params.visible + 4) * 512;
+    size_t buf_size = ((size_t)params.visible + 6) * 512;
     char *buf = (char *)malloc(buf_size);
     if (!buf)
     {
@@ -755,44 +781,49 @@ void *SelectEx(const char *message,
         size_t visible = (size_t)params.visible;
         if (visible > options_length)
             visible = options_length;
-        if (visible > (size_t)(trows - 2))
-            visible = (size_t)(trows - 2);
+
+        size_t overhead = 1 + (has_border ? 2 : 1); /* message [+ top + bottom] */
+        int available = trows - (int)overhead - (int)has_border;      /* rows left after message [+ borders] */
+        size_t max_visible = (size_t)(available >= 1 ? available : 1);
+        
+        if (visible > max_visible)
+            visible = max_visible;
         if (visible < 1)
             visible = 1;
 
-        size_t block_h = visible + 1; /* 1 riga messaggio + visible righe opzioni */
+        /* total lines the block occupies */
+        size_t block_h = visible + overhead;
 
-        /* ── primo frame o resize: riserva/aggiusta spazio ────────────────── */
+        /* ── first frame: reserve space ───────────────────────────────────── */
         if (first)
         {
+            // Handle overflow: check if cursor is on last row and scroll if needed
+            if (CursorIsOnLastRow((int)block_h - 1))
+                printf("\x1b[S");  // Scroll up one line
+            
             reserve_block(block_h);
             first = 0;
         }
-        else if (block_h != last_block_h)
+        else if (block_h > last_block_h)
         {
-            /* il terminale è stato ridimensionato: adatta il blocco           */
-            if (block_h > last_block_h)
-            {
-                /* serve più spazio: stampa righe extra e riserva              */
-                for (size_t i = 0; i < block_h - last_block_h; i++)
-                    putchar('\n');
-                printf("\x1b[%zuA", block_h);
-                fflush(stdout);
-            }
+            /* block grew: push extra blank lines then jump back */
+            for (size_t i = 0; i < block_h - last_block_h; i++)
+                putchar('\n');
+            printf("\x1b[%zuA", block_h);
+            fflush(stdout);
         }
-        last_block_h = block_h;
 
-        /* reallocare il buffer se visible è cresciuto oltre le stime iniziali */
+        /* grow buffer if needed */
         if (block_h * 512 > buf_size)
         {
-            buf_size = block_h * 512 + 256;
+            buf_size = block_h * 512 + 512;
             char *nb = (char *)realloc(buf, buf_size);
             if (!nb)
                 break;
             buf = nb;
         }
 
-        /* ── aggiusta finestra scorrevole ─────────────────────────────────── */
+        /* ── scroll window ────────────────────────────────────────────────── */
         if (current < (int)top)
             top = (size_t)current;
         else if (current >= (int)(top + visible))
@@ -801,10 +832,9 @@ void *SelectEx(const char *message,
         int scroll_up = (top > 0);
         int scroll_down = (top + visible < options_length);
 
-        /* ── componi il frame ─────────────────────────────────────────────── */
         size_t pos = 0;
 
-        /* riga messaggio */
+        /* ── message row ──────────────────────────────────────────────────── */
         pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
         if (params.instruction && params.instruction[0])
             pos += (size_t)snprintf(buf + pos, buf_size - pos,
@@ -815,37 +845,76 @@ void *SelectEx(const char *message,
                                     C_YELLOW "%s " C_RESET "%s\n",
                                     params.qmark, message);
 
-        /* righe opzioni */
+        /* ── top border ───────────────────────────────────────────────────── */
+        if (has_border)
+        {
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    DELETE_ROW C_BBLACK "┌");
+            for (int i = 2; i < tcols; i++)
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "─");
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "┐\n" C_RESET);
+        }
+
+        /* ── option rows ──────────────────────────────────────────────────── */
         for (size_t i = 0; i < visible; i++)
         {
             size_t idx = top + i;
             pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
 
+            if (has_border)
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        C_BBLACK "│" C_RESET);
+
             if ((int)idx == current)
             {
-                /* riga selezionata: chevron ciano + testo bold-white           */
                 pos += (size_t)snprintf(buf + pos, buf_size - pos,
                                         C_CYAN "> " C_BWHITE "%s" C_RESET,
                                         options[idx].display);
             }
             else
             {
-                /* righe normali: dimmed; frecce scorrevoli sui bordi           */
                 const char *arrow = "";
                 if (i == 0 && scroll_up)
                     arrow = "  " C_BBLACK "^" C_RESET;
                 if (i == visible - 1 && scroll_down)
                     arrow = "  " C_BBLACK "v" C_RESET;
                 pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                        C_BBLACK "  %s" C_RESET "%s",
+                                        "  " C_BBLACK "%s" C_RESET "%s",
                                         options[idx].display, arrow);
             }
+
+            if (has_border)
+                /* jump to last column and draw right edge */
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        "\x1b[%dG" C_BBLACK "│" C_RESET, tcols);
+
             pos += (size_t)snprintf(buf + pos, buf_size - pos, "\n");
         }
 
-        /* risali all'inizio del blocco per il prossimo frame */
-        pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                "\x1b[%zuA", block_h);
+        /* ── bottom border ────────────────────────────────────────────────── */
+        if (has_border)
+        {
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    DELETE_ROW C_BBLACK "└");
+            for (int i = 2; i < tcols; i++)
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, "─");
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "┘\n" C_RESET);
+        }
+
+        if (last_block_h > block_h)
+        {
+            for (size_t i = 0; i < last_block_h - block_h; i++)
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        DELETE_ROW "\n");
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    "\x1b[%zuA", last_block_h);
+        }
+        else
+        {
+            pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                    "\x1b[%zuA", block_h);
+        }
+        last_block_h = block_h;
 
         fwrite(buf, 1, pos, stdout);
         fflush(stdout);
@@ -875,10 +944,8 @@ void *SelectEx(const char *message,
     }
 
     printf(DELETE_FROM_CURSOR);
-
     printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
            params.amark, message, options[current].display);
-
     printf("\x1b[?25h");
     fflush(stdout);
     free(buf);
