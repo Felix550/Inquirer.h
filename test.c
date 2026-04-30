@@ -2,7 +2,7 @@
 #define INQUIRER_IMPL
 #include "Inquirer.h"
 
-#define OPTIONS_LENGHT 50
+#define OPTIONS_LENGHT 5
 
 bool validate_password(const char *input, const char *message, void *data)
 {
@@ -13,14 +13,14 @@ bool validate_password(const char *input, const char *message, void *data)
 
 int main(void)
 {
-    Option options[5] = {0};
+    Option options[OPTIONS_LENGHT] = {0};
     options[0] = (Option){.display = "Rust", .value = (void *)"rs"};
     options[1] = (Option){.display = "C", .value = (void *)"c"};
     options[2] = (Option){.display = "C++", .value = (void *)"cpp"};
     options[3] = (Option){.display = "Python", .value = (void *)"py"};
     options[4] = (Option){.display = "Lua", .value = (void *)"how?"};
 
-    void *selected = Select("What's Your Favourite language:", options, 5, .amark = "!", .flags = SELECT_BORDER);
+    void *selected = Select("What's Your Favourite language:", options, OPTIONS_LENGHT, .amark = "!", .flags = SELECT_BORDER);
     printf("Input: %s\n", (char *)selected);
 
     char *name = Text("What's Your Name:", NULL);
