@@ -237,13 +237,18 @@ INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *m
 // Should not echo back after submit
 #define TEXT_HIDE_ECHO (1 << 1)
 
-// Field can be empty
-#define TEXT_NOT_REQUIRED (1 << 2)
-
-// Flags for Text, SELECT_ Prefix
+// Flags for Select, SELECT_ Prefix
 
 // The selection box should have a border
 #define SELECT_BORDER (1 << 0)
+
+// Enable multiselect mode
+#define SELECT_MULTISELECT (1 << 1)
+
+// General Flags
+
+// Field can be empty
+#define FIELD_NOT_REQUIRED (1 << 16)
 
 typedef struct
 {
@@ -288,6 +293,21 @@ typedef struct
 
     // Flags, they start with SELECT_
     int flags;
+
+    //----------Multiselect specific----------
+
+    //The text displayer after the ':' when you selected nothing
+    char *empty_display;
+
+    // Minimum number of selections required (for multiselect, default 1 if FIELD_NOT_REQUIRED not set)
+    int required_count;
+
+    // Message to show when input is required but was submitted empty
+    char *required_message;
+
+    // Marks to show when option is selected/unselected (default [X] / [ ])
+    char *selected_mark;
+    char *unselected_mark;
 } SelectParams;
 
 typedef struct
@@ -295,6 +315,13 @@ typedef struct
     char *display;
     void *value;
 } Option;
+
+// Result structure for multiselect
+typedef struct
+{
+    Option *selected;  // Array of selected options
+    size_t count;      // Count of selected options
+} MultiSelectResult;
 
 typedef struct
 {
@@ -320,7 +347,7 @@ INQUIRERDEF void readline(char *out, size_t out_size, bool put_newline, bool is_
 // Expanded Text Input, Must Call free(...) on the out char*
 INQUIRERDEF char *TextEx(const char *message, TextParams *params);
 
-// Expanded Select Input
+// Expanded Select Input (for single select, returns void*; for multiselect, returns MultiSelectResult*)
 INQUIRERDEF void *SelectEx(const char *message, Option *options, size_t options_lenght, SelectParams *params);
 
 // expanded Confirm
@@ -355,9 +382,18 @@ INQUIRERDEF void ClearError();
 //  options[2] = (Option){.display = "C++", .value = (void *)"cpp"};
 //  options[3] = (Option){.display = "Python", .value = (void *)"py"};
 //  options[4] = (Option){.display = "Lua", .value = (void *)"how?"};
+//  
+//  // Single select:
 //  void *selected = Select("What's Your Favourite language:", options, 5);
 //                                                                      ^---- options_count
 //  ... use selected (casting it to it's original type) ...
+//
+//  // Multiselect:
+//  MultiSelectResult *result = Select("Select languages:", options, 5, .flags = SELECT_MULTISELECT);
+//  for (size_t i = 0; i < result->count; i++)
+//    printf("Selected: %s\n", result->selected[i].display);
+//  free(result->selected);
+//  free(result);
 #define Select(message, options, options_lenght, ...) SelectEx(message, options, options_lenght, &(SelectParams){__VA_ARGS__})
 
 #define Confirm(message, ...) ConfirmEx(message, &(ConfirmParams){__VA_ARGS__});
@@ -525,31 +561,21 @@ char *tmp_sprintf(const char *fmt, ...)
 
 void ShowError(const char *message)
 {
-    bool will_overwrite = CursorIsOnLastRow(1);
-
-    printf("\x1b[s"); // save cursor
-
-    if (will_overwrite)
-        printf("\x1b[S"); // scroll up
-
-    printf("\x1b[B");   // go down one line (relative positioning)
-    printf(DELETE_ROW); // clean row
+    printf("\x1b[s");           // save cursor
+    printf(BOTTOM_LEFT);        // move to bottom left
+    printf(DELETE_ROW);         // clean row
     printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
-
-    printf("\x1b[u"); // restore cursor
+    printf("\x1b[u");           // restore cursor
+    fflush(stdout);
 }
 
 void ClearError()
 {
-    printf("\x1b[s"); // save cursor
-
-    printf("\r");     // got the the start of the line
-    printf("\x1b[B"); // go down a line
-
-    printf(DELETE_FROM_CURSOR); // clean up from cursor
-
-    printf("\x1b[A"); // go up a line
-    printf("\x1b[u"); // reset cursor
+    printf("\x1b[s");           // save cursor
+    printf(BOTTOM_LEFT);        // move to bottom left
+    printf(DELETE_ROW);         // clean row
+    printf("\x1b[u");           // restore cursor
+    fflush(stdout);
 }
 
 char *TextEx(const char *message, TextParams *p)
@@ -646,7 +672,7 @@ char *TextEx(const char *message, TextParams *p)
             out[len] = '\0';
 
             // true if it is not a requirement, false if it is a requirement and empty, true if it is a requirement and full
-            bool empty_check = params.flags & TEXT_NOT_REQUIRED || len > 0;
+            bool empty_check = params.flags & FIELD_NOT_REQUIRED || len > 0;
 
             if ((!params.validation || params.validation(out, message, params.data)) && empty_check)
             {
@@ -733,7 +759,7 @@ static void reserve_block(size_t n)
 {
     for (size_t i = 0; i < n; i++)
         putchar('\n');
-    printf("\x1b[%zuA", n);
+    printf("\x1b[%zuA", n + 1);
     fflush(stdout);
 }
 
@@ -757,6 +783,13 @@ void *SelectEx(const char *message,
     params.qmark = "?";
     params.instruction = "(Use arrow keys)";
     params.visible = 20;
+    params.required_count = 1;
+    params.empty_display = "Nothing";
+    params.required_message = "This field is required";
+
+    params.selected_mark = "[X]";
+    params.unselected_mark = "[ ]";
+
     if (p)
     {
         if (p->amark)
@@ -767,11 +800,22 @@ void *SelectEx(const char *message,
             params.instruction = p->instruction;
         if (p->visible)
             params.visible = p->visible;
+        if (p->required_count > 0)
+            params.required_count = p->required_count;
+        if (p->empty_display)
+            params.empty_display = p->empty_display;
+        if (p->required_message)
+            params.required_message = p->required_message;
+        if (p->selected_mark)
+            params.selected_mark = p->selected_mark;
+        if (p->unselected_mark)
+            params.unselected_mark = p->unselected_mark;
         if (p->flags)
             params.flags |= p->flags;
     }
 
     int has_border = (params.flags & SELECT_BORDER) != 0;
+    int is_multiselect = (params.flags & SELECT_MULTISELECT) != 0;
 
     printf("\x1b[?25l");
     fflush(stdout);
@@ -784,10 +828,24 @@ void *SelectEx(const char *message,
         return NULL;
     }
 
+    // Multiselect thingy
+    bool *selected = NULL;
+    if (is_multiselect)
+    {
+        selected = (bool *)calloc(options_length, sizeof(bool));
+        if (!selected)
+        {
+            printf("\x1b[?25h");
+            free(buf);
+            return NULL;
+        }
+    }
+
     int current = 0;
     size_t top = 0;
     size_t last_block_h = 0;
     int first = 1;
+    int show_invalid = 0;
 
     while (1)
     {
@@ -799,8 +857,8 @@ void *SelectEx(const char *message,
         if (visible > options_length)
             visible = options_length;
 
-        size_t overhead = 1 + (has_border ? 2 : 1);              /* message [+ top + bottom] */
-        int available = trows - (int)overhead - (int)has_border; /* rows left after message [+ borders] */
+        size_t overhead = 1 + (has_border ? 2 : 1);              
+        int available = trows - (int)overhead - (int)has_border; 
         size_t max_visible = (size_t)(available >= 1 ? available : 1);
 
         if (visible > max_visible)
@@ -884,20 +942,40 @@ void *SelectEx(const char *message,
 
             if ((int)idx == current)
             {
-                pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                        C_CYAN "> " C_BWHITE "%s" C_RESET,
-                                        options[idx].display);
+                if (is_multiselect)
+                {
+                    const char *checkbox = selected[idx] ? params.selected_mark : params.unselected_mark;
+                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                            C_CYAN "> " C_BWHITE "%s " C_RESET "%s" C_RESET,
+                                            checkbox, options[idx].display);
+                }
+                else
+                {
+                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                            C_CYAN "> " C_BWHITE "%s" C_RESET,
+                                            options[idx].display);
+                }
             }
             else
             {
-                const char *arrow = "";
-                if (i == 0 && scroll_up)
-                    arrow = "  " C_BBLACK "^" C_RESET;
-                if (i == visible - 1 && scroll_down)
-                    arrow = "  " C_BBLACK "v" C_RESET;
-                pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                        "  " C_BBLACK "%s" C_RESET "%s",
-                                        options[idx].display, arrow);
+                if (is_multiselect)
+                {
+                    const char *checkbox = selected[idx] ? params.selected_mark : params.unselected_mark;
+                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                            "  " C_BBLACK "%s " C_RESET "%s",
+                                            checkbox, options[idx].display);
+                }
+                else
+                {
+                    const char *arrow = "";
+                    if (i == 0 && scroll_up)
+                        arrow = "  " C_BBLACK "^" C_RESET;
+                    if (i == visible - 1 && scroll_down)
+                        arrow = "  " C_BBLACK "v" C_RESET;
+                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                            "  " C_BBLACK "%s" C_RESET "%s",
+                                            options[idx].display, arrow);
+                }
             }
 
             if (has_border)
@@ -938,6 +1016,14 @@ void *SelectEx(const char *message,
 
         /* ── input ────────────────────────────────────────────────────────── */
         int ch = _getch();
+        
+        // Clear invalid message if any key is pressed
+        if (show_invalid)
+        {
+            ClearError();
+            show_invalid = 0;
+        }
+        
         if (ch == 0 || ch == KEY_ARROWS)
         {
             ch = _getch();
@@ -948,7 +1034,33 @@ void *SelectEx(const char *message,
         }
         else if (ch == KEY_ENTER)
         {
+            // Validate multiselect requirements
+            if (is_multiselect)
+            {
+                // Count selected items
+                size_t selected_count = 0;
+                for (size_t i = 0; i < options_length; i++)
+                {
+                    if (selected[i])
+                        selected_count++;
+                }
+
+                // Check if selection meets requirements
+                int is_required = !(params.flags & FIELD_NOT_REQUIRED);
+                int min_required = is_required ? params.required_count : 0;
+
+                if (selected_count < (size_t)min_required)
+                {
+                    show_invalid = 1;
+                    ShowError(params.required_message);
+                    continue;
+                }
+            }
             break;
+        }
+        else if (ch == ' ' && is_multiselect)
+        {
+            selected[current] = !selected[current];
         }
         else if (ch == KEY_CTRL_C)
         {
@@ -956,18 +1068,81 @@ void *SelectEx(const char *message,
             printf("\x1b[?25h");
             fflush(stdout);
             free(buf);
+            if (is_multiselect)
+                free(selected);
             exit(0);
         }
     }
 
     printf(DELETE_FROM_CURSOR);
-    printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
-           params.amark, message, options[current].display);
-    printf("\x1b[?25h");
-    fflush(stdout);
-    free(buf);
 
-    return options[current].value;
+    if (is_multiselect)
+    {
+        // Count selected items
+        size_t count = 0;
+        for (size_t i = 0; i < options_length; i++)
+        {
+            if (selected[i])
+                count++;
+        }
+
+        // Create result structure
+        MultiSelectResult *result = (MultiSelectResult *)malloc(sizeof(MultiSelectResult));
+        if (result)
+        {
+            result->count = count;
+            result->selected = (Option *)malloc(count * sizeof(Option));
+
+            if (result->selected && result->count > 0)
+            {
+                size_t idx = 0;
+                for (size_t i = 0; i < options_length; i++)
+                {
+                    if (selected[i])
+                    {
+                        result->selected[idx++] = options[i];
+                    }
+                }
+
+                // Display selected items
+                char *display = (char *)malloc(DEFAULT_CAPACITY);
+                if (display)
+                {
+                    size_t dpos = 0;
+                    for (size_t i = 0; i < result->count; i++)
+                    {
+                        if (i > 0)
+                            dpos += snprintf(display + dpos, DEFAULT_CAPACITY - dpos, ", ");
+                        dpos += snprintf(display + dpos, DEFAULT_CAPACITY - dpos, "%s",
+                                       result->selected[i].display);
+                    }
+                    printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
+                           params.amark, message, display);
+                    free(display);
+                }
+            }else{
+                printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
+                    params.amark, message, "Nothing");
+            }
+        }
+
+        printf("\x1b[?25h");
+        fflush(stdout);
+        free(buf);
+        free(selected);
+
+        return (void *)result;
+    }
+    else
+    {
+        printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
+               params.amark, message, options[current].display);
+        printf("\x1b[?25h");
+        fflush(stdout);
+        free(buf);
+
+        return options[current].value;
+    }
 }
 
 bool ConfirmEx(const char *message, ConfirmParams *p)
