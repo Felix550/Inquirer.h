@@ -1243,7 +1243,7 @@ void *SelectEx(const char *message,
                 break;
             }
 
-            if (is_multiselect && ch == ' ')
+            if (is_multiselect && ch == '\t')
             {
                 if (current_pos >= 0 && filtered_count > 0)
                 {
@@ -1253,7 +1253,7 @@ void *SelectEx(const char *message,
                 continue;
             }
 
-            if (isprint(ch) && ch != ' ')
+            if (isprint(ch) && ch != '\t')
             {
                 if (query_len < sizeof(query) - 1)
                 {
@@ -1312,7 +1312,7 @@ void *SelectEx(const char *message,
 
             break;
         }
-        else if (ch == ' ' && is_multiselect)
+        else if (ch == '\t' && is_multiselect)
         {
             if (current_pos >= 0 && filtered_count > 0)
             {
