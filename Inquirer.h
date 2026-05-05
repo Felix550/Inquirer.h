@@ -245,6 +245,9 @@ INQUIRERDEF typedef bool (*validation_callback)(const char *input, const char *m
 // Enable multiselect mode
 #define SELECT_MULTISELECT (1 << 1)
 
+// Enable Fuzzy Search on Select/Muliselect, You can't put spaces
+#define SELECT_FUZZY (1 << 2)
+
 // General Flags
 
 // Field can be empty
@@ -296,7 +299,7 @@ typedef struct
 
     //----------Multiselect specific----------
 
-    //The text displayer after the ':' when you selected nothing
+    // The text displayer after the ':' when you selected nothing
     char *empty_display;
 
     // Minimum number of selections required (for multiselect, default 1 if FIELD_NOT_REQUIRED not set)
@@ -319,8 +322,8 @@ typedef struct
 // Result structure for multiselect
 typedef struct
 {
-    Option *selected;  // Array of selected options
-    size_t count;      // Count of selected options
+    Option *selected; // Array of selected options
+    size_t count;     // Count of selected options
 } MultiSelectResult;
 
 typedef struct
@@ -382,7 +385,7 @@ INQUIRERDEF void ClearError();
 //  options[2] = (Option){.display = "C++", .value = (void *)"cpp"};
 //  options[3] = (Option){.display = "Python", .value = (void *)"py"};
 //  options[4] = (Option){.display = "Lua", .value = (void *)"how?"};
-//  
+//
 //  // Single select:
 //  void *selected = Select("What's Your Favourite language:", options, 5);
 //                                                                      ^---- options_count
@@ -561,20 +564,20 @@ char *tmp_sprintf(const char *fmt, ...)
 
 void ShowError(const char *message)
 {
-    printf("\x1b[s");           // save cursor
-    printf(BOTTOM_LEFT);        // move to bottom left
-    printf(DELETE_ROW);         // clean row
+    printf("\x1b[s");    // save cursor
+    printf(BOTTOM_LEFT); // move to bottom left
+    printf(DELETE_ROW);  // clean row
     printf(BG_RED C_BWHITE C_BOLD "%s" C_RESET, message);
-    printf("\x1b[u");           // restore cursor
+    printf("\x1b[u"); // restore cursor
     fflush(stdout);
 }
 
 void ClearError()
 {
-    printf("\x1b[s");           // save cursor
-    printf(BOTTOM_LEFT);        // move to bottom left
-    printf(DELETE_ROW);         // clean row
-    printf("\x1b[u");           // restore cursor
+    printf("\x1b[s");    // save cursor
+    printf(BOTTOM_LEFT); // move to bottom left
+    printf(DELETE_ROW);  // clean row
+    printf("\x1b[u");    // restore cursor
     fflush(stdout);
 }
 
@@ -613,8 +616,8 @@ char *TextEx(const char *message, TextParams *p)
     char *out = malloc(DEFAULT_CAPACITY);
 
     // Handle overflow: check if cursor is on last row and scroll if needed
-    if (CursorIsOnLastRow(1))
-        printf("\x1b[S"); // Scroll up one line
+    // if (CursorIsOnLastRow(1))
+    //    printf("\x1b[A"); // Scroll up one line
 
     if (strcmp(params.instruction, "") != 0)
         printf(C_YELLOW "%s " C_RESET "%s " C_BWHITE "%s " C_BGREEN, params.qmark, message, params.instruction);
@@ -763,6 +766,73 @@ static void reserve_block(size_t n)
     fflush(stdout);
 }
 
+static int fuzzy_match_ci(const char *text, const char *query)
+{
+    if (!query || !*query)
+        return 1;
+    if (!text)
+        return 0;
+
+    size_t qi = 0;
+    for (size_t ti = 0; text[ti] && query[qi]; ++ti)
+    {
+        if (tolower((unsigned char)text[ti]) == tolower((unsigned char)query[qi]))
+            ++qi;
+    }
+
+    return query[qi] == '\0';
+}
+
+static size_t build_filtered_indices(Option *options,
+                                     size_t options_length,
+                                     const char *query,
+                                     size_t *filtered)
+{
+    size_t count = 0;
+
+    for (size_t i = 0; i < options_length; ++i)
+    {
+        if (fuzzy_match_ci(options[i].display, query))
+            filtered[count++] = i;
+    }
+
+    return count;
+}
+
+static void build_fuzzy_prompt(char *dst, size_t dst_size,
+                               const char *qmark,
+                               const char *message,
+                               const char *query,
+                               size_t query_cur,
+                               const char *instruction)
+{
+    size_t pos = 0;
+    size_t qlen = strlen(query);
+
+    pos += (size_t)snprintf(dst + pos, dst_size - pos,
+                            C_YELLOW "%s " C_RESET "%s ",
+                            qmark, message);
+
+    pos += (size_t)snprintf(dst + pos, dst_size - pos, C_BGREEN);
+
+    for (size_t i = 0; i < qlen && pos < dst_size; ++i)
+    {
+        if (i == query_cur)
+            pos += (size_t)snprintf(dst + pos, dst_size - pos, C_BWHITE "|" C_BGREEN);
+
+        pos += (size_t)snprintf(dst + pos, dst_size - pos, "%c", query[i]);
+    }
+
+    if (query_cur == qlen && pos < dst_size)
+        pos += (size_t)snprintf(dst + pos, dst_size - pos, C_BWHITE "|" C_BGREEN);
+
+    pos += (size_t)snprintf(dst + pos, dst_size - pos, C_RESET);
+
+    if (instruction && instruction[0])
+        pos += (size_t)snprintf(dst + pos, dst_size - pos,
+                                " " C_BWHITE "%s" C_RESET, instruction);
+}
+
 void *SelectEx(const char *message,
                Option *options,
                size_t options_length,
@@ -786,7 +856,6 @@ void *SelectEx(const char *message,
     params.required_count = 1;
     params.empty_display = "Nothing";
     params.required_message = "This field is required";
-
     params.selected_mark = "[X]";
     params.unselected_mark = "[ ]";
 
@@ -816,6 +885,7 @@ void *SelectEx(const char *message,
 
     int has_border = (params.flags & SELECT_BORDER) != 0;
     int is_multiselect = (params.flags & SELECT_MULTISELECT) != 0;
+    int is_fuzzy = (params.flags & SELECT_FUZZY) != 0;
 
     printf("\x1b[?25l");
     fflush(stdout);
@@ -828,7 +898,14 @@ void *SelectEx(const char *message,
         return NULL;
     }
 
-    // Multiselect thingy
+    size_t *filtered = (size_t *)malloc(options_length * sizeof(size_t));
+    if (!filtered)
+    {
+        printf("\x1b[?25h");
+        free(buf);
+        return NULL;
+    }
+
     bool *selected = NULL;
     if (is_multiselect)
     {
@@ -836,12 +913,18 @@ void *SelectEx(const char *message,
         if (!selected)
         {
             printf("\x1b[?25h");
+            free(filtered);
             free(buf);
             return NULL;
         }
     }
 
-    int current = 0;
+    char query[256] = {0};
+    size_t query_len = 0;
+    size_t query_cur = 0;
+
+    int current_pos = 0;      // position in filtered list
+    size_t current_index = 0; // original option index
     size_t top = 0;
     size_t last_block_h = 0;
     int first = 1;
@@ -857,8 +940,8 @@ void *SelectEx(const char *message,
         if (visible > options_length)
             visible = options_length;
 
-        size_t overhead = 1 + (has_border ? 2 : 1);              
-        int available = trows - (int)overhead - (int)has_border; 
+        size_t overhead = 1 + (has_border ? 2 : 0);
+        int available = trows - (int)overhead - (int)has_border;
         size_t max_visible = (size_t)(available >= 1 ? available : 1);
 
         if (visible > max_visible)
@@ -866,61 +949,101 @@ void *SelectEx(const char *message,
         if (visible < 1)
             visible = 1;
 
-        /* total lines the block occupies */
         size_t block_h = visible + overhead;
 
-        /* ── first frame: reserve space ───────────────────────────────────── */
         if (first)
         {
-            // Handle overflow: check if cursor is on last row and scroll if needed
             if (CursorIsOnLastRow((int)block_h - 1))
-                printf("\x1b[S"); // Scroll up one line
-
+                printf("\x1b[S");
             reserve_block(block_h);
             first = 0;
         }
         else if (block_h > last_block_h)
         {
-            /* block grew: push extra blank lines then jump back */
             for (size_t i = 0; i < block_h - last_block_h; i++)
                 putchar('\n');
             printf("\x1b[%zuA", block_h);
             fflush(stdout);
         }
 
-        /* grow buffer if needed */
-        if (block_h * 512 > buf_size)
+        size_t filtered_count = options_length;
+        if (is_fuzzy)
+            filtered_count = build_filtered_indices(options, options_length, query, filtered);
+        else
         {
-            buf_size = block_h * 512 + 512;
-            char *nb = (char *)realloc(buf, buf_size);
-            if (!nb)
-                break;
-            buf = nb;
+            for (size_t i = 0; i < options_length; i++)
+                filtered[i] = i;
         }
 
-        /* ── scroll window ────────────────────────────────────────────────── */
-        if (current < (int)top)
-            top = (size_t)current;
-        else if (current >= (int)(top + visible))
-            top = (size_t)current - visible + 1;
+        if (filtered_count == 0)
+        {
+            current_pos = -1;
+        }
+        else
+        {
+            int found = -1;
+            for (size_t i = 0; i < filtered_count; i++)
+            {
+                if (filtered[i] == current_index)
+                {
+                    found = (int)i;
+                    break;
+                }
+            }
+
+            if (found < 0)
+            {
+                current_pos = 0;
+                current_index = filtered[0];
+            }
+            else
+            {
+                current_pos = found;
+            }
+        }
+
+        if (current_pos >= 0)
+        {
+            if (current_pos < (int)top)
+                top = (size_t)current_pos;
+            else if (current_pos >= (int)(top + visible))
+                top = (size_t)current_pos - visible + 1;
+        }
+        else
+        {
+            top = 0;
+        }
 
         int scroll_up = (top > 0);
-        int scroll_down = (top + visible < options_length);
+        int scroll_down = (top + visible < filtered_count);
 
         size_t pos = 0;
 
-        /* ── message row ──────────────────────────────────────────────────── */
         pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
-        if (params.instruction && params.instruction[0])
-            pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                    C_YELLOW "%s " C_RESET "%s " C_BBLACK "%s" C_RESET "\n",
-                                    params.qmark, message, params.instruction);
-        else
-            pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                    C_YELLOW "%s " C_RESET "%s\n",
-                                    params.qmark, message);
 
-        /* ── top border ───────────────────────────────────────────────────── */
+        if (is_fuzzy)
+        {
+            build_fuzzy_prompt(buf + pos, buf_size - pos,
+                               params.qmark, message, query, query_cur, params.instruction);
+            pos += strlen(buf + pos);
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "\n");
+        }
+        else
+        {
+            if (params.instruction && params.instruction[0])
+            {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        C_YELLOW "%s " C_RESET "%s " C_BWHITE "%s" C_RESET "\n",
+                                        params.qmark, message, params.instruction);
+            }
+            else
+            {
+                pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                        C_YELLOW "%s " C_RESET "%s\n",
+                                        params.qmark, message);
+            }
+        }
+
         if (has_border)
         {
             pos += (size_t)snprintf(buf + pos, buf_size - pos,
@@ -930,63 +1053,74 @@ void *SelectEx(const char *message,
             pos += (size_t)snprintf(buf + pos, buf_size - pos, "┐\n" C_RESET);
         }
 
-        /* ── option rows ──────────────────────────────────────────────────── */
         for (size_t i = 0; i < visible; i++)
         {
             size_t idx = top + i;
             pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW);
 
             if (has_border)
-                pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                        C_BBLACK "│" C_RESET);
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, C_BBLACK "│" C_RESET);
 
-            if ((int)idx == current)
+            if (filtered_count == 0)
             {
-                if (is_multiselect)
-                {
-                    const char *checkbox = selected[idx] ? params.selected_mark : params.unselected_mark;
-                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                            C_CYAN "> " C_BWHITE "%s " C_RESET "%s" C_RESET,
-                                            checkbox, options[idx].display);
-                }
-                else
+                if (i == 0)
                 {
                     pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                            C_CYAN "> " C_BWHITE "%s" C_RESET,
-                                            options[idx].display);
+                                            "  " C_BBLACK "%s" C_RESET,
+                                            params.empty_display);
                 }
             }
-            else
+            else if (idx < filtered_count)
             {
-                if (is_multiselect)
+                size_t original = filtered[idx];
+
+                if ((int)idx == current_pos)
                 {
-                    const char *checkbox = selected[idx] ? params.selected_mark : params.unselected_mark;
-                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                            "  " C_BBLACK "%s " C_RESET "%s",
-                                            checkbox, options[idx].display);
+                    if (is_multiselect)
+                    {
+                        const char *checkbox = selected[original] ? params.selected_mark : params.unselected_mark;
+                        pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                                C_CYAN "> " C_BWHITE "%s " C_RESET "%s" C_RESET,
+                                                checkbox, options[original].display);
+                    }
+                    else
+                    {
+                        pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                                C_CYAN "> " C_BWHITE "%s" C_RESET,
+                                                options[original].display);
+                    }
                 }
                 else
                 {
-                    const char *arrow = "";
-                    if (i == 0 && scroll_up)
-                        arrow = "  " C_BBLACK "^" C_RESET;
-                    if (i == visible - 1 && scroll_down)
-                        arrow = "  " C_BBLACK "v" C_RESET;
-                    pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                            "  " C_BBLACK "%s" C_RESET "%s",
-                                            options[idx].display, arrow);
+                    if (is_multiselect)
+                    {
+                        const char *checkbox = selected[original] ? params.selected_mark : params.unselected_mark;
+                        pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                                "  " C_BBLACK "%s " C_RESET "%s",
+                                                checkbox, options[original].display);
+                    }
+                    else
+                    {
+                        const char *arrow = "";
+                        if (i == 0 && scroll_up)
+                            arrow = "  " C_BBLACK "^" C_RESET;
+                        if (i == visible - 1 && scroll_down)
+                            arrow = "  " C_BBLACK "v" C_RESET;
+
+                        pos += (size_t)snprintf(buf + pos, buf_size - pos,
+                                                "  " C_BBLACK "%s" C_RESET "%s",
+                                                options[original].display, arrow);
+                    }
                 }
             }
 
             if (has_border)
-                /* jump to last column and draw right edge */
                 pos += (size_t)snprintf(buf + pos, buf_size - pos,
                                         "\x1b[%dG" C_BBLACK "│" C_RESET, tcols);
 
             pos += (size_t)snprintf(buf + pos, buf_size - pos, "\n");
         }
 
-        /* ── bottom border ────────────────────────────────────────────────── */
         if (has_border)
         {
             pos += (size_t)snprintf(buf + pos, buf_size - pos,
@@ -999,45 +1133,160 @@ void *SelectEx(const char *message,
         if (last_block_h > block_h)
         {
             for (size_t i = 0; i < last_block_h - block_h; i++)
-                pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                        DELETE_ROW "\n");
-            pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                    "\x1b[%zuA", last_block_h);
+                pos += (size_t)snprintf(buf + pos, buf_size - pos, DELETE_ROW "\n");
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "\x1b[%zuA", last_block_h);
         }
         else
         {
-            pos += (size_t)snprintf(buf + pos, buf_size - pos,
-                                    "\x1b[%zuA", block_h);
+            pos += (size_t)snprintf(buf + pos, buf_size - pos, "\x1b[%zuA", block_h);
         }
         last_block_h = block_h;
 
         fwrite(buf, 1, pos, stdout);
         fflush(stdout);
 
-        /* ── input ────────────────────────────────────────────────────────── */
         int ch = _getch();
-        
-        // Clear invalid message if any key is pressed
+
         if (show_invalid)
         {
             ClearError();
             show_invalid = 0;
         }
-        
+
+        if (ch == KEY_CTRL_C)
+        {
+            printf(DELETE_FROM_CURSOR);
+            printf("\x1b[?25h");
+            fflush(stdout);
+            free(filtered);
+            free(buf);
+            if (selected)
+                free(selected);
+            exit(0);
+        }
+
+        if (is_fuzzy)
+        {
+            if (ch == 0 || ch == KEY_ARROWS)
+            {
+                int ext = _getch();
+
+                if (ext == KEY_ARROW_L)
+                {
+                    if (query_cur > 0)
+                        query_cur--;
+                }
+                else if (ext == KEY_ARROW_R)
+                {
+                    if (query_cur < query_len)
+                        query_cur++;
+                }
+                else if (ext == KEY_ARROW_U)
+                {
+                    if (filtered_count > 0 && current_pos >= 0)
+                    {
+                        current_pos = (current_pos > 0) ? current_pos - 1 : (int)filtered_count - 1;
+                        current_index = filtered[(size_t)current_pos];
+                    }
+                }
+                else if (ext == KEY_ARROW_D)
+                {
+                    if (filtered_count > 0 && current_pos >= 0)
+                    {
+                        current_pos = (current_pos < (int)filtered_count - 1) ? current_pos + 1 : 0;
+                        current_index = filtered[(size_t)current_pos];
+                    }
+                }
+                continue;
+            }
+
+            if (ch == KEY_BACKSPACE)
+            {
+                if (query_cur > 0)
+                {
+                    memmove(&query[query_cur - 1],
+                            &query[query_cur],
+                            query_len - query_cur + 1);
+                    query_cur--;
+                    query_len--;
+                }
+                continue;
+            }
+
+            if (ch == KEY_ENTER)
+            {
+                if (is_multiselect)
+                {
+                    size_t selected_count = 0;
+                    for (size_t i = 0; i < options_length; i++)
+                    {
+                        if (selected[i])
+                            selected_count++;
+                    }
+
+                    int is_required = !(params.flags & FIELD_NOT_REQUIRED);
+                    int min_required = is_required ? params.required_count : 0;
+
+                    if (selected_count < (size_t)min_required)
+                    {
+                        show_invalid = 1;
+                        ShowError(params.required_message);
+                        continue;
+                    }
+                }
+                else
+                {
+                    if (filtered_count == 0)
+                        continue;
+                }
+
+                break;
+            }
+
+            if (is_multiselect && ch == ' ')
+            {
+                if (current_pos >= 0 && filtered_count > 0)
+                {
+                    size_t original = filtered[(size_t)current_pos];
+                    selected[original] = !selected[original];
+                }
+                continue;
+            }
+
+            if (isprint(ch) && ch != ' ')
+            {
+                if (query_len < sizeof(query) - 1)
+                {
+                    memmove(&query[query_cur + 1],
+                            &query[query_cur],
+                            query_len - query_cur + 1);
+                    query[query_cur] = (char)ch;
+                    query_cur++;
+                    query_len++;
+                }
+            }
+
+            continue;
+        }
+
         if (ch == 0 || ch == KEY_ARROWS)
         {
             ch = _getch();
-            if (ch == KEY_ARROW_U)
-                current = (current > 0) ? current - 1 : (int)options_length - 1;
-            else if (ch == KEY_ARROW_D)
-                current = (current < (int)options_length - 1) ? current + 1 : 0;
+
+            if (filtered_count > 0 && current_pos >= 0)
+            {
+                if (ch == KEY_ARROW_U)
+                    current_pos = (current_pos > 0) ? current_pos - 1 : (int)filtered_count - 1;
+                else if (ch == KEY_ARROW_D)
+                    current_pos = (current_pos < (int)filtered_count - 1) ? current_pos + 1 : 0;
+
+                current_index = filtered[(size_t)current_pos];
+            }
         }
         else if (ch == KEY_ENTER)
         {
-            // Validate multiselect requirements
             if (is_multiselect)
             {
-                // Count selected items
                 size_t selected_count = 0;
                 for (size_t i = 0; i < options_length; i++)
                 {
@@ -1045,7 +1294,6 @@ void *SelectEx(const char *message,
                         selected_count++;
                 }
 
-                // Check if selection meets requirements
                 int is_required = !(params.flags & FIELD_NOT_REQUIRED);
                 int min_required = is_required ? params.required_count : 0;
 
@@ -1056,21 +1304,21 @@ void *SelectEx(const char *message,
                     continue;
                 }
             }
+            else
+            {
+                if (filtered_count == 0)
+                    continue;
+            }
+
             break;
         }
         else if (ch == ' ' && is_multiselect)
         {
-            selected[current] = !selected[current];
-        }
-        else if (ch == KEY_CTRL_C)
-        {
-            printf(DELETE_FROM_CURSOR);
-            printf("\x1b[?25h");
-            fflush(stdout);
-            free(buf);
-            if (is_multiselect)
-                free(selected);
-            exit(0);
+            if (current_pos >= 0 && filtered_count > 0)
+            {
+                size_t original = filtered[(size_t)current_pos];
+                selected[original] = !selected[original];
+            }
         }
     }
 
@@ -1078,7 +1326,6 @@ void *SelectEx(const char *message,
 
     if (is_multiselect)
     {
-        // Count selected items
         size_t count = 0;
         for (size_t i = 0; i < options_length; i++)
         {
@@ -1086,7 +1333,6 @@ void *SelectEx(const char *message,
                 count++;
         }
 
-        // Create result structure
         MultiSelectResult *result = (MultiSelectResult *)malloc(sizeof(MultiSelectResult));
         if (result)
         {
@@ -1099,12 +1345,9 @@ void *SelectEx(const char *message,
                 for (size_t i = 0; i < options_length; i++)
                 {
                     if (selected[i])
-                    {
                         result->selected[idx++] = options[i];
-                    }
                 }
 
-                // Display selected items
                 char *display = (char *)malloc(DEFAULT_CAPACITY);
                 if (display)
                 {
@@ -1114,20 +1357,28 @@ void *SelectEx(const char *message,
                         if (i > 0)
                             dpos += snprintf(display + dpos, DEFAULT_CAPACITY - dpos, ", ");
                         dpos += snprintf(display + dpos, DEFAULT_CAPACITY - dpos, "%s",
-                                       result->selected[i].display);
+                                         result->selected[i].display);
                     }
+
                     printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
                            params.amark, message, display);
                     free(display);
                 }
-            }else{
+            }
+            else
+            {
+                if (result->selected)
+                    free(result->selected);
+                result->selected = NULL;
+
                 printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
-                    params.amark, message, "Nothing");
+                       params.amark, message, params.empty_display);
             }
         }
 
         printf("\x1b[?25h");
         fflush(stdout);
+        free(filtered);
         free(buf);
         free(selected);
 
@@ -1136,12 +1387,13 @@ void *SelectEx(const char *message,
     else
     {
         printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
-               params.amark, message, options[current].display);
+               params.amark, message, options[current_index].display);
         printf("\x1b[?25h");
         fflush(stdout);
+        free(filtered);
         free(buf);
 
-        return options[current].value;
+        return options[current_index].value;
     }
 }
 
@@ -1189,7 +1441,8 @@ bool ConfirmEx(const char *message, ConfirmParams *p)
         {
             result = false;
             break;
-        }else if (ch == KEY_CTRL_C)
+        }
+        else if (ch == KEY_CTRL_C)
         {
             exit(0);
         }
@@ -1197,10 +1450,10 @@ bool ConfirmEx(const char *message, ConfirmParams *p)
 
     char display_result[4];
 
-    if(result)
-        snprintf(display_result,sizeof(display_result),"Yes");
+    if (result)
+        snprintf(display_result, sizeof(display_result), "Yes");
     else
-        snprintf(display_result,sizeof(display_result),"No");
+        snprintf(display_result, sizeof(display_result), "No");
 
     printf(DELETE_FROM_CURSOR);
     printf(DELETE_ROW C_YELLOW "%s " C_RESET "%s " C_BBLUE "%s" C_RESET "\n",
