@@ -758,11 +758,11 @@ char *TextEx(const char *message, TextParams *p)
     return out;
 }
 
-static void reserve_block(size_t n)
+static void reserve_block(size_t n, int flow)
 {
     for (size_t i = 0; i < n; i++)
         putchar('\n');
-    printf("\x1b[%zuA", n + 1);
+    printf("\x1b[%zuA", n + flow);
     fflush(stdout);
 }
 
@@ -953,9 +953,13 @@ void *SelectEx(const char *message,
 
         if (first)
         {
-            if (CursorIsOnLastRow((int)block_h - 1))
+            int flow = 0;
+            if (CursorIsOnLastRow((int)block_h - 1)){
+                flow = 1;
                 printf("\x1b[S");
-            reserve_block(block_h);
+            }
+
+            reserve_block(block_h, flow);
             first = 0;
         }
         else if (block_h > last_block_h)

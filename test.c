@@ -23,7 +23,7 @@ int main(void)
 
     void *selected = Select("What's Your Favourite language:", options, OPTIONS_LENGHT, .amark = "!", .flags = SELECT_BORDER);
     printf("Input: %s\n", (char *)selected);
-
+    
     // Multiselect example (will infer it's Type)
     MultiSelectResult *multi = Select("What Languages do you Hate:", options, OPTIONS_LENGHT, .amark = "!", .flags = SELECT_BORDER | SELECT_MULTISELECT | SELECT_FUZZY, .required_count = 2);
     if (multi)
