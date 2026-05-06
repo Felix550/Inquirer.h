@@ -4,5 +4,5 @@ else
     OUT := test
 endif
 
-$(OUT): test.c inquirer.h
+$(OUT): test.c Inquirer.h
 	gcc -Wall -Wextra -o $(OUT) test.c
