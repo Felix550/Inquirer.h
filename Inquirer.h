@@ -167,6 +167,7 @@ void init_terminal(void)
 void restore_terminal(void)
 {
     tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
+    printf("\n");
     fflush(stdout);
 }
 #endif /* _WIN32 */
@@ -437,7 +438,7 @@ void handler(int sig)
 {
     (void)sig;
     restore_terminal();
-    printf(DELETE_FROM_CURSOR);
+    printf(C_RESET DELETE_FROM_CURSOR);
     printf("\x1b[?25h");
     fflush(stdout);
     _exit(0);
@@ -583,6 +584,13 @@ void ClearError()
 
 char *TextEx(const char *message, TextParams *p)
 {
+#ifndef _WIN32
+    init_terminal();
+    signal(SIGINT, handler);
+#else
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
     TextParams params = {0};
     params.amark = "?";
     params.qmark = "?";
@@ -954,7 +962,8 @@ void *SelectEx(const char *message,
         if (first)
         {
             int flow = 0;
-            if (CursorIsOnLastRow((int)block_h - 1)){
+            if (CursorIsOnLastRow((int)block_h - 1))
+            {
                 flow = 1;
                 printf("\x1b[S");
             }
@@ -1403,6 +1412,12 @@ void *SelectEx(const char *message,
 
 bool ConfirmEx(const char *message, ConfirmParams *p)
 {
+#ifndef _WIN32
+    init_terminal();
+    signal(SIGINT, handler);
+#else
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     ConfirmParams params = {0};
     params.amark = "?";
     params.qmark = "?";
