@@ -10,7 +10,7 @@ Easy API, Documented in [Source Code](./Inquirer.h)
 [![Release][release-badge]][releases]
 [![License][license-badge]][license]
 
-[c-badge]: https://img.shields.io/badge/builtwith-C11-00599C?logo=C&logoColor=white&style=flat-square
+[c-badge]: https://img.shields.io/badge/builtwith-C99-00599C?logo=C&logoColor=white&style=flat-square
 [c]: https://www.c-language.org/
 
 [release-badge]: https://img.shields.io/github/v/release/Felix550/Inquirer.h?logo=github&logoColor=white&style=flat-square&color=44BB00
