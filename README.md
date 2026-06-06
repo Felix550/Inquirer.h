@@ -1,5 +1,5 @@
 <div align="center">
-#Inquirer.h
+# Inquirer.h
 
 Port of Inquirer.js to C
 
