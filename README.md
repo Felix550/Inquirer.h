@@ -4,7 +4,7 @@
 
 Port of Inquirer.js to C
 
-Easy API, Documented in [Source Code](./Inquirer.h)
+API Documented in [Source Code](./Inquirer.h)
 
 [![C][c-badge]][c]
 [![Release][release-badge]][releases]
